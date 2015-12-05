@@ -32,27 +32,30 @@ millinclude_HEADERS = libmill.h
 lib_LTLIBRARIES = libmill.la
 
 libmill_la_SOURCES = \
-    chan.h\
-    chan.c\
-    cr.h\
-    cr.c\
-    debug.h\
-    debug.c\
-    ip.h\
-    ip.c\
-    list.h\
-    list.c\
-    poller.h\
-    poller.c\
-    slist.h\
-    slist.c\
-    stack.h\
-    stack.c\
-    tcp.c\
-    udp.c\
-    unix.c\
-    utils.h\
-    utils.c
+    chan.h \
+    chan.c \
+    cr.h \
+    cr.c \
+    debug.h \
+    debug.c \
+    ip.h \
+    ip.c \
+    list.h \
+    list.c \
+    poller.h \
+    poller.c \
+    slist.h \
+    slist.c \
+    stack.h \
+    stack.c \
+    tcp.c \
+    udp.c \
+    unix.c \
+    utils.h \
+    utils.c \
+    poll.inc \
+    epoll.inc \
+    kqueue.inc
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libmill.pc
@@ -98,7 +101,8 @@ noinst_PROGRAMS = \
     perf/chan\
     perf/chs\
     perf/chr\
-    perf/whispers
+    perf/whispers\
+    perf/c10k
 
 ################################################################################
 #  tutorial                                                                    #
@@ -110,7 +114,8 @@ noinst_PROGRAMS += \
     tutorial/step3 \
     tutorial/step4 \
     tutorial/step5 \
-    tutorial/step6
+    tutorial/step6 \
+    tutorial/step7
 
 ################################################################################
 #  additional packaging-related stuff                                          #

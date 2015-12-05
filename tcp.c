@@ -69,6 +69,7 @@ struct mill_tcpconn {
     size_t olen;
     char ibuf[MILL_TCP_BUFLEN];
     char obuf[MILL_TCP_BUFLEN];
+    ipaddr addr;
 };
 
 static void mill_tcptune(int s) {
@@ -123,6 +124,7 @@ tcpsock tcplisten(ipaddr addr, int backlog) {
         rc = getsockname(s, (struct sockaddr*)&baddr, &len);
         if(rc == -1) {
             int err = errno;
+            fdclean(s);
             close(s);
             errno = err;
             return NULL;
@@ -133,6 +135,7 @@ tcpsock tcplisten(ipaddr addr, int backlog) {
     /* Create the object. */
     struct mill_tcplistener *l = malloc(sizeof(struct mill_tcplistener));
     if(!l) {
+        fdclean(s);
         close(s);
         errno = ENOMEM;
         return NULL;
@@ -145,28 +148,38 @@ tcpsock tcplisten(ipaddr addr, int backlog) {
 }
 
 int tcpport(tcpsock s) {
-    if(s->type != MILL_TCPLISTENER)
-        mill_panic("trying to get port from a socket that isn't listening");
-    struct mill_tcplistener *l = (struct mill_tcplistener*)s;
-    return l->port;
+    if(s->type == MILL_TCPCONN) {
+        struct mill_tcpconn *c = (struct mill_tcpconn*)s;
+        return mill_ipport(c->addr);
+    }
+    else if(s->type == MILL_TCPLISTENER) {
+        struct mill_tcplistener *l = (struct mill_tcplistener*)s;
+        return l->port;
+    }
+    mill_assert(0);
 }
 
 tcpsock tcpaccept(tcpsock s, int64_t deadline) {
     if(s->type != MILL_TCPLISTENER)
         mill_panic("trying to accept on a socket that isn't listening");
     struct mill_tcplistener *l = (struct mill_tcplistener*)s;
+    socklen_t addrlen;
+    ipaddr addr;
     while(1) {
         /* Try to get new connection (non-blocking). */
-        int as = accept(l->fd, NULL, NULL);
+        addrlen = sizeof(addr);
+        int as = accept(l->fd, (struct sockaddr *)&addr, &addrlen);
         if (as >= 0) {
             mill_tcptune(as);
             struct mill_tcpconn *conn = malloc(sizeof(struct mill_tcpconn));
             if(!conn) {
+                fdclean(as);
                 close(as);
                 errno = ENOMEM;
                 return NULL;
             }
             tcpconn_init(conn, as);
+            conn->addr = addr;
             errno = 0;
             return (tcpsock)conn;
         }
@@ -206,11 +219,13 @@ tcpsock tcpconnect(ipaddr addr, int64_t deadline) {
         rc = getsockopt(s, SOL_SOCKET, SO_ERROR, (void*)&err, &errsz);
         if(rc != 0) {
             err = errno;
+            fdclean(s);
             close(s);
             errno = err;
             return NULL;
         }
         if(err != 0) {
+            fdclean(s);
             close(s);
             errno = err;
             return NULL;
@@ -220,6 +235,7 @@ tcpsock tcpconnect(ipaddr addr, int64_t deadline) {
     /* Create the object. */
     struct mill_tcpconn *conn = malloc(sizeof(struct mill_tcpconn));
     if(!conn) {
+        fdclean(s);
         close(s);
         errno = ENOMEM;
         return NULL;
@@ -414,6 +430,7 @@ size_t tcprecvuntil(tcpsock s, void *buf, size_t len,
 void tcpclose(tcpsock s) {
     if(s->type == MILL_TCPLISTENER) {
         struct mill_tcplistener *l = (struct mill_tcplistener*)s;
+        fdclean(l->fd);
         int rc = close(l->fd);
         mill_assert(rc == 0);
         free(l);
@@ -421,6 +438,7 @@ void tcpclose(tcpsock s) {
     }
     if(s->type == MILL_TCPCONN) {
         struct mill_tcpconn *c = (struct mill_tcpconn*)s;
+        fdclean(c->fd);
         int rc = close(c->fd);
         mill_assert(rc == 0);
         free(c);
@@ -471,5 +489,12 @@ int tcpdetach(tcpsock s) {
         return fd;
     }
     mill_assert(0);
+}
+
+ipaddr tcpaddr(tcpsock s) {
+    if(s->type != MILL_TCPCONN)
+        mill_panic("trying to get address from a socket that isn't connected");
+    struct mill_tcpconn *l = (struct mill_tcpconn *)s;
+    return l->addr;
 }
 

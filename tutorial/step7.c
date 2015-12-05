@@ -29,16 +29,46 @@
 
 #include "../libmill.h"
 
-coroutine void dialogue(tcpsock as) {
-    tcpsend(as, "What's your name?\r\n", 19, -1);
+#define CONN_ESTABLISHED 1
+#define CONN_SUCCEEDED 2
+#define CONN_FAILED 3
+
+coroutine void statistics(chan ch) {
+    int connections = 0;
+    int active = 0;
+    int failed = 0;
+    
+    while(1) {
+        int op = chr(ch, int);
+
+        if(op == CONN_ESTABLISHED)
+            ++connections, ++active;
+        else
+            --active;
+        if(op == CONN_FAILED)
+            ++failed;
+
+        printf("Process ID: %d\n", (int)getpid());
+        printf("Total number of connections: %d\n", connections);
+        printf("Active connections: %d\n", active);
+        printf("Failed connections: %d\n\n", failed);
+    }
+}
+
+coroutine void dialogue(tcpsock as, chan ch) {
+    chs(ch, int, CONN_ESTABLISHED);
+
+    int64_t deadline = now() + 10000;
+
+    tcpsend(as, "What's your name?\r\n", 19, deadline);
     if(errno != 0)
         goto cleanup;
-    tcpflush(as, -1);
+    tcpflush(as, deadline);
     if(errno != 0)
         goto cleanup;
 
     char inbuf[256];
-    size_t sz = tcprecvuntil(as, inbuf, sizeof(inbuf), "\r", 1, -1);
+    size_t sz = tcprecvuntil(as, inbuf, sizeof(inbuf), "\r", 1, deadline);
     if(errno != 0)
         goto cleanup;
 
@@ -46,22 +76,29 @@ coroutine void dialogue(tcpsock as) {
     char outbuf[256];
     int rc = snprintf(outbuf, sizeof(outbuf), "Hello, %s!\r\n", inbuf);
 
-    sz = tcpsend(as, outbuf, rc, -1);
+    sz = tcpsend(as, outbuf, rc, deadline);
     if(errno != 0)
         goto cleanup;
-    tcpflush(as, -1);
+    tcpflush(as, deadline);
     if(errno != 0)
         goto cleanup;
 
     cleanup:
+    if(errno == 0)
+        chs(ch, int, CONN_SUCCEEDED);
+    else
+        chs(ch, int, CONN_FAILED);
     tcpclose(as);
 }
 
 int main(int argc, char *argv[]) {
 
     int port = 5555;
+    int nproc = 1;
     if(argc > 1)
         port = atoi(argv[1]);
+    if(argc > 2)
+        nproc = atoi(argv[2]);
 
     ipaddr addr = iplocal(NULL, port, 0);
     tcpsock ls = tcplisten(addr, 10);
@@ -70,11 +107,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    int i;
+    for (i = 0; i < nproc - 1; ++i) {
+        pid_t pid = fork();
+        if(pid < 0) {
+           perror("Can't create new process");
+           return 1;
+        }
+        if(pid > 0)
+            break;
+    }
+
+    chan ch = chmake(int, 0);
+    go(statistics(ch));
+
     while(1) {
         tcpsock as = tcpaccept(ls, -1);
         if(!as)
             continue;
-        go(dialogue(as));
+        go(dialogue(as, ch));
     }
 }
 

@@ -22,16 +22,24 @@
 
 */
 
-#include <errno.h>
-#include <poll.h>
-#include <stddef.h>
-#include <stdlib.h>
+#include <stdint.h>
+#include <sys/param.h>
 
 #include "cr.h"
 #include "libmill.h"
 #include "list.h"
 #include "poller.h"
-#include "utils.h"
+
+/* Forward declarations for the functions implemented by specific poller
+   mechanisms (poll, epoll, kqueue). */
+void mill_poller_init(void);
+static void mill_poller_add(int fd, int events);
+static void mill_poller_rm(int fd, int events);
+static void mill_poller_clean(int fd);
+static int mill_poller_wait(int timeout);
+
+/* If 1, mill_poller_init was already called. */
+static int mill_poller_initialised = 0;
 
 /* Global linked list of all timers. The list is ordered.
    First timer to be resume comes first and so on. */
@@ -42,33 +50,12 @@ void mill_msleep(int64_t deadline, const char *current) {
     mill_fdwait(-1, 0, deadline, current);
 }
 
-/* Pollset used for waiting for file descriptors. */
-static int mill_pollset_size = 0;
-static int mill_pollset_capacity = 0;
-static struct pollfd *mill_pollset_fds = NULL;
-
-/* The item at a specific index in this array corresponds to the entry
-   in mill_pollset fds with the same index. */
-struct mill_pollset_item {
-    struct mill_fdwait *in;
-    struct mill_fdwait *out;
-};
-static struct mill_pollset_item *mill_pollset_items = NULL;
-
-/* Find pollset index by fd. If fd is not in pollset, return the index after
-   the last item.
-   TODO: This is O(n) operation! */
-static int mill_find_pollset(int fd) {
-    int i;
-    for(i = 0; i != mill_pollset_size; ++i) {
-        if(mill_pollset_fds[i].fd == fd)
-            break;
-    }
-    return i;
-}
-
-/* Wait for events from a file descriptor, with an optional timeout. */
 int mill_fdwait(int fd, int events, int64_t deadline, const char *current) {
+    if(mill_slow(!mill_poller_initialised)) {
+        mill_poller_init();
+        mill_assert(errno == 0);
+        mill_poller_initialised = 1;
+    }
     /* If required, start waiting for the timeout. */
     if(deadline >= 0) {
         mill_running->u_fdwait.expiry = deadline;
@@ -86,41 +73,8 @@ int mill_fdwait(int fd, int events, int64_t deadline, const char *current) {
         mill_list_insert(&mill_timers, &mill_running->u_fdwait.item, it);
     }
     /* If required, start waiting for the file descriptor. */
-    if(fd >= 0) {
-        int i = mill_find_pollset(fd);
-        /* Grow the pollset as needed. */
-        if(i == mill_pollset_size) {
-            if(mill_pollset_size == mill_pollset_capacity) {
-                mill_pollset_capacity = mill_pollset_capacity ?
-                    mill_pollset_capacity * 2 : 64;
-                mill_pollset_fds = realloc(mill_pollset_fds,
-                    mill_pollset_capacity * sizeof(struct pollfd));
-                mill_pollset_items = realloc(mill_pollset_items,
-                    mill_pollset_capacity * sizeof(struct mill_pollset_item));
-            }
-            ++mill_pollset_size;
-            mill_pollset_fds[i].fd = fd;
-            mill_pollset_fds[i].events = 0;
-            mill_pollset_fds[i].revents = 0;
-            mill_pollset_items[i].in = NULL;
-            mill_pollset_items[i].out = NULL;
-        }
-        /* Register the new file descriptor in the pollset. */
-        if(events & FDW_IN) {
-            if(mill_slow(mill_pollset_items[i].in))
-                mill_panic(
-                    "multiple coroutines waiting for a single file descriptor");
-            mill_pollset_fds[i].events |= POLLIN;
-            mill_pollset_items[i].in = &mill_running->u_fdwait;
-        }
-        if(events & FDW_OUT) {
-            if(mill_slow(mill_pollset_items[i].out))
-                mill_panic(
-                    "multiple coroutines waiting for a single file descriptor");
-            mill_pollset_fds[i].events |= POLLOUT;
-            mill_pollset_items[i].out = &mill_running->u_fdwait;
-        }
-    }
+    if(fd >= 0)
+        mill_poller_add(fd, events);
     /* Do actual waiting. */
     mill_running->state = fd < 0 ? MILL_MSLEEP : MILL_FDWAIT;
     mill_set_current(&mill_running->debug, current);
@@ -132,39 +86,27 @@ int mill_fdwait(int fd, int events, int64_t deadline, const char *current) {
         return rc;
     }
     /* Handle the timeout. Clean-up the pollset. */
-    if(fd >= 0) {
-        /* We have to do this again because the pollset may have changed while
-           the coroutine was suspended. */
-        int i = mill_find_pollset(fd);
-        mill_assert(i < mill_pollset_size);
-        if(mill_pollset_items[i].in == &mill_running->u_fdwait) {
-            mill_pollset_items[i].in = NULL;
-            mill_pollset_fds[i].events &= ~POLLIN;
-        }
-        if(mill_pollset_items[i].out == &mill_running->u_fdwait) {
-            mill_pollset_items[i].out = NULL;
-            mill_pollset_fds[i].events &= ~POLLOUT;
-        }
-        if(!mill_pollset_fds[i].events) {
-            --mill_pollset_size;
-            if(i < mill_pollset_size) {
-                mill_pollset_items[i] = mill_pollset_items[mill_pollset_size];
-                mill_pollset_fds[i] = mill_pollset_fds[mill_pollset_size];
-            }
-        }
-    }
+    if(fd >= 0)
+        mill_poller_rm(fd, events);
     return 0;
 }
 
+void fdclean(int fd) {
+    if(mill_slow(!mill_poller_initialised)) {
+        mill_poller_init();
+        mill_assert(errno == 0);
+        mill_poller_initialised = 1;
+    }
+    mill_poller_clean(fd);
+}
+
 void mill_wait(int block) {
-    /* The execution of the entire process would block. Let's panic. */
-    if(block && mill_slow(mill_list_empty(&mill_timers) && !mill_pollset_size))
-        mill_panic("global hang-up");
-
-    int fired = 0;
-    int rc;
+    if(mill_slow(!mill_poller_initialised)) {
+        mill_poller_init();
+        mill_assert(errno == 0);
+        mill_poller_initialised = 1;
+    }
     while(1) {
-
         /* Compute timeout for the subsequent poll. */
         int timeout;
         if(!block) {
@@ -182,13 +124,8 @@ void mill_wait(int block) {
                 timeout = -1;
             }
         }
-
         /* Wait for events. */
-        rc = poll(mill_pollset_fds, mill_pollset_size, timeout);
-        if(rc < 0 && errno == EINTR)
-            continue;
-        mill_assert(rc >= 0);
-
+        int fired = mill_poller_wait(timeout);
         /* Fire all expired timers. */
         if(!mill_list_empty(&mill_timers)) {
             int64_t nw = now();
@@ -203,67 +140,29 @@ void mill_wait(int block) {
             }
         }
         /* Never retry the poll in non-blocking mode. */
-        if(!block)
+        if(!block || fired)
             break;
         /* If timeout was hit but there were no expired timers do the poll
            again. This should not happen in theory but let's be ready for the
            case when the system timers are not precise. */
-        if(!(rc == 0 && !fired))
-            break;
-    }
-
-    /* Fire file descriptor events. */
-    int i;
-    for(i = 0; i != mill_pollset_size && rc; ++i) {
-        int inevents = 0;
-        int outevents = 0;
-        /* Set the result values. */
-        if(mill_pollset_fds[i].revents & POLLIN)
-            inevents |= FDW_IN;
-        if(mill_pollset_fds[i].revents & POLLOUT)
-            outevents |= FDW_OUT;
-        if(mill_pollset_fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            inevents |= FDW_ERR;
-            outevents |= FDW_ERR;
-        }
-        /* Fire the callbacks. */
-        if(mill_pollset_items[i].in &&
-              mill_pollset_items[i].in == mill_pollset_items[i].out) {
-            struct mill_cr *cr = mill_cont(mill_pollset_items[i].in,
-                struct mill_cr, u_fdwait);
-            mill_resume(cr, inevents | outevents);
-            mill_pollset_fds[i].events = 0;
-            mill_pollset_items[i].in = NULL;
-            mill_pollset_items[i].out = NULL;
-        }
-        else {
-            if(mill_pollset_items[i].in && inevents) {
-                struct mill_cr *cr = mill_cont(mill_pollset_items[i].in,
-                    struct mill_cr, u_fdwait);
-                mill_resume(cr, inevents);
-                mill_pollset_fds[i].events &= ~POLLIN;
-                mill_pollset_items[i].in = NULL;
-            }
-            else if(mill_pollset_items[i].out && outevents) {
-                struct mill_cr *cr = mill_cont(mill_pollset_items[i].out,
-                    struct mill_cr, u_fdwait);
-                mill_resume(cr, outevents);
-                mill_pollset_fds[i].events &= ~POLLOUT;
-                mill_pollset_items[i].out = NULL;
-            }
-        }
-        /* If nobody is polling for the fd remove it from the pollset. */
-        if(!mill_pollset_fds[i].events) {
-            mill_assert(!mill_pollset_items[i].in &&
-                !mill_pollset_items[i].out);
-            --mill_pollset_size;
-            if(i != mill_pollset_size) {
-                mill_pollset_fds[i] = mill_pollset_fds[mill_pollset_size];
-                mill_pollset_items[i] = mill_pollset_items[mill_pollset_size];
-            }
-            --i;
-            --rc;
-        }
     }
 }
+
+/* Include the poll-mechanism-specific stuff. */
+
+/* User overloads. */
+#if defined MILL_EPOLL
+#include "epoll.inc"
+#elif defined MILL_KQUEUE
+#include "kqueue.inc"
+#elif defined MILL_POLL
+#include "poll.inc"
+/* Defaults. */
+#elif defined __linux__
+#include "epoll.inc"
+#elif defined BSD
+#include "kqueue.inc"
+#else
+#include "poll.inc"
+#endif
 

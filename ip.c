@@ -149,6 +149,18 @@ int mill_ipport(ipaddr addr) {
         ((struct sockaddr_in6*)&addr)->sin6_port);
 }
 
+/* Convert IP address from network format to ASCII dot notation. */
+const char *ipaddrstr(ipaddr addr, char *ipstr) {
+    if (mill_ipfamily(addr) == AF_INET) {
+        return inet_ntop(AF_INET, &(((struct sockaddr_in*)&addr)->sin_addr),
+            ipstr, INET_ADDRSTRLEN);
+    }
+    else {
+        return inet_ntop(AF_INET6, &(((struct sockaddr_in6*)&addr)->sin6_addr),
+            ipstr, INET6_ADDRSTRLEN);
+    }
+}
+
 ipaddr iplocal(const char *name, int port, int mode) {
     if(!name)
         return mill_ipany(port, mode);
@@ -268,6 +280,7 @@ ipaddr ipremote(const char *name, int port, int mode, int64_t deadline) {
     int rc = getaddrinfo_a(GAI_NOWAIT, &pgcb, 1, &sev);
     if(mill_slow(rc != 0)) {
         if(rc == EAI_AGAIN || rc == EAI_MEMORY) {
+            fdclean(efd);
             close(efd);
             errno = ENOMEM;
             return addr;
@@ -280,6 +293,7 @@ ipaddr ipremote(const char *name, int port, int mode, int64_t deadline) {
         rc = fdwait(efd, FDW_IN, -1);
     }
     mill_assert(rc == FDW_IN);
+    fdclean(efd);
     close(efd);
     rc = gai_error(&gcb);
     if(rc != 0) {

@@ -24,6 +24,7 @@
 
 #include <assert.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "../libmill.h"
 
@@ -31,6 +32,11 @@ coroutine void client(int port) {
     ipaddr addr = ipremote("127.0.0.1", port, 0, -1);
     tcpsock cs = tcpconnect(addr, -1);
     assert(cs);
+
+    char ipstr[16] = {0};
+    ipaddrstr(addr, ipstr);
+    assert(errno == 0);
+    assert(strcmp(ipstr, "127.0.0.1") == 0);
 
     int fd = tcpdetach(cs);
     assert(fd != -1);
@@ -67,12 +73,18 @@ int main() {
 
     tcpsock as = tcpaccept(ls, -1);
 
+    /* Test retrieving address and port. */
+    ipaddr addr = tcpaddr(as);
+    char ipstr[IPADDR_MAXSTRLEN];
+    assert(strcmp(ipaddrstr(addr, ipstr), "127.0.0.1") == 0);
+    assert(tcpport(as) != 5555);
+
     /* Test deadline. */
     int64_t deadline = now() + 30;
     size_t sz = tcprecv(as, buf, sizeof(buf), deadline);
     assert(sz == 0 && errno == ETIMEDOUT);
     int64_t diff = now() - deadline;
-    assert(diff > -20 && diff < 20); 
+    assert(diff > -20 && diff < 20);
 
     sz = tcpsend(as, "ABC", 3, -1);
     assert(sz == 3 && errno == 0);

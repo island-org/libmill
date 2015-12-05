@@ -39,10 +39,10 @@
 /*  www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html  */
 
 /*  The current interface version. */
-#define MILL_VERSION_CURRENT 10
+#define MILL_VERSION_CURRENT 12
 
 /*  The latest revision of the current interface. */
-#define MILL_VERSION_REVISION 1
+#define MILL_VERSION_REVISION 0
 
 /*  How many past interface versions are still supported. */
 #define MILL_VERSION_AGE 0
@@ -82,7 +82,7 @@ MILL_EXPORT int64_t now(void);
 /*  Coroutines                                                                */
 /******************************************************************************/
 
-MILL_EXPORT int goprepare(int count, size_t stack_size, size_t val_size);
+MILL_EXPORT void goprepare(int count, size_t stack_size, size_t val_size);
 
 MILL_EXPORT extern volatile int mill_unoptimisable1;
 MILL_EXPORT extern volatile void *mill_unoptimisable2;
@@ -123,6 +123,8 @@ MILL_EXPORT void mill_msleep(int64_t deadline, const char *current);
 
 #define fdwait(fd, events, deadline) mill_fdwait((fd), (events), (deadline),\
     __FILE__ ":" mill_string(__LINE__))
+
+MILL_EXPORT void fdclean(int fd);
 
 #define FDW_IN 1
 #define FDW_OUT 2
@@ -267,12 +269,14 @@ MILL_EXPORT void *mill_choose_val(size_t sz);
 #define IPADDR_IPV6 2
 #define IPADDR_PREF_IPV4 3
 #define IPADDR_PREF_IPV6 4
+#define IPADDR_MAXSTRLEN 46
 
 typedef struct {char data[32];} ipaddr;
 
 MILL_EXPORT ipaddr iplocal(const char *name, int port, int mode);
 MILL_EXPORT ipaddr ipremote(const char *name, int port, int mode,
     int64_t deadline);
+MILL_EXPORT const char *ipaddrstr(ipaddr addr, char *ipstr);
 
 /******************************************************************************/
 /*  TCP library                                                               */
@@ -283,6 +287,7 @@ typedef struct mill_tcpsock *tcpsock;
 MILL_EXPORT tcpsock tcplisten(ipaddr addr, int backlog);
 MILL_EXPORT int tcpport(tcpsock s);
 MILL_EXPORT tcpsock tcpaccept(tcpsock s, int64_t deadline);
+MILL_EXPORT ipaddr tcpaddr(tcpsock s);
 MILL_EXPORT tcpsock tcpconnect(ipaddr addr, int64_t deadline);
 MILL_EXPORT size_t tcpsend(tcpsock s, const void *buf, size_t len,
     int64_t deadline);
@@ -293,6 +298,7 @@ MILL_EXPORT size_t tcprecvuntil(tcpsock s, void *buf, size_t len,
 MILL_EXPORT void tcpclose(tcpsock s);
 MILL_EXPORT tcpsock tcpattach(int fd, int listening);
 MILL_EXPORT int tcpdetach(tcpsock s);
+
 
 /******************************************************************************/
 /*  UDP library                                                               */
